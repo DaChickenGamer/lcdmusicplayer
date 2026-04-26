@@ -8,8 +8,8 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 // ---------------- PINS ----------------
 const int IR_PIN = 27;
 const int xAxis = 34;
-const int btn = 32;
 const int audioPin = 25;
+const int ledPin = 32;
 
 // ---------------- STATE ----------------
 enum MenuState { SELECT_GENRE, SELECT_SONG, PLAYING };
@@ -35,14 +35,14 @@ int currentSong = 0;
 #define IR_MINUS 0x09
 #define IR_PLAY 0x44
 
-int volume = 5;
-
 // ---------------- AUDIO ----------------
-int marioMelody[] = {659, 659, 0, 659, 0, 523, 659, 784};
-int tetrisMelody[] = {659, 494, 523, 587, 523, 494, 440, 440};
-int ghostMelody[]  = {392, 0, 392, 330, 392, 0, 262, 0};
-int skullMelody[]  = {262, 294, 330, 294, 262, 0, 196, 0};
-int questMelody[]  = {440, 494, 523, 587, 659, 587, 523, 494};
+int volume = 5; // 0–10
+
+int marioMelody[]   = {659, 659, 0, 659, 0, 523, 659, 784};
+int tetrisMelody[]  = {659, 494, 523, 587, 523, 494, 440, 440};
+int ghostMelody[]   = {392, 0, 392, 330, 392, 0, 262, 0};
+int skullMelody[]   = {262, 294, 330, 294, 262, 0, 196, 0};
+int questMelody[]   = {440, 494, 523, 587, 659, 587, 523, 494};
 int victoryMelody[] = {784, 659, 523, 659, 784, 880, 784, 0};
 
 // ---------------- AUDIO ENGINE ----------------
@@ -51,10 +51,19 @@ int noteIndex = 0;
 unsigned long noteTimer = 0;
 bool playingSong = false;
 
-// ---------------- BUTTON DEBOUNCE ----------------
-bool lastBtnState = HIGH;
-unsigned long lastDebounce = 0;
-const int debounceDelay = 60;
+// ---------------- LED STATE ----------------
+int ledBrightness = 0;
+bool ledFlashActive = false;
+unsigned long ledFlashTimer = 0;
+
+// ---------------- LEDC CHANNELS ----------------
+const int audioChannel = 0;
+const int ledChannel = 1;
+
+// ---------------- HELPERS ----------------
+int volumeToAmp() {
+  return map(volume, 0, 10, 0, 255);
+}
 
 // ---------------- SETUP ----------------
 void setup() {
@@ -63,10 +72,13 @@ void setup() {
   lcd.init();
   lcd.backlight();
 
-  pinMode(btn, INPUT_PULLUP);
-  pinMode(audioPin, OUTPUT);
+  pinMode(xAxis, INPUT);
 
   IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
+
+  // ESP32 v3 LEDC setup
+  ledcAttach(ledPin, 5000, 8);
+  ledcAttach(audioPin, 2000, 8);
 
   updateDisplay();
 }
@@ -76,6 +88,7 @@ void loop() {
   handleIR();
   handleJoystick();
   updateSong();
+  updateLedFlash();
 }
 
 // ---------------- IR ----------------
@@ -108,15 +121,28 @@ void handleIR() {
       currentGenre = -1;
       menuState = SELECT_GENRE;
       break;
-    case IR_PLAY:
-        if (menuState == SELECT_SONG && currentGenre >= 0) {
-          lcd.clear();
-          lcd.setCursor(0, 0);
-          lcd.print("Starting...");
-          delay(300);
 
-          startSong();
+    case IR_PLUS:
+      volume++;
+      if (volume > 10) volume = 10;
+      triggerLedFlash();
+      break;
+
+    case IR_MINUS:
+      volume--;
+      if (volume < 0) volume = 0;
+      triggerLedFlash();
+      break;
+
+    case IR_PLAY:
+      if (menuState == SELECT_SONG && currentGenre >= 0) {
+        lcd.clear();
+        lcd.setCursor(0, 0);
+        lcd.print("Starting...");
+        delay(300);
+        startSong();
       }
+      break;
   }
 
   IrReceiver.resume();
@@ -134,6 +160,7 @@ void handleJoystick() {
 
   updateDisplay();
 }
+
 // ---------------- START SONG ----------------
 void startSong() {
 
@@ -148,8 +175,6 @@ void startSong() {
   noteTimer = millis();
   playingSong = true;
 
-  tone(audioPin, melody[0]);
-
   menuState = PLAYING;
   updateDisplay();
 }
@@ -160,25 +185,45 @@ void updateSong() {
 
   if (millis() - noteTimer > 300) {
 
+    noteTimer = millis();
     noteIndex++;
 
     if (noteIndex >= 8) {
       playingSong = false;
-      noTone(audioPin);
+      ledcWrite(audioPin, 0);
       menuState = SELECT_SONG;
       updateDisplay();
       return;
     }
 
-    noteTimer = millis();
-
     int freq = melody[noteIndex];
 
     if (freq > 0 && volume > 0) {
-      tone(audioPin, freq);
+      ledcWriteTone(audioPin, freq);
+      ledcWrite(audioPin, volumeToAmp());
     } else {
-      noTone(audioPin);
+      ledcWrite(audioPin, 0);
     }
+
+    // LED ALWAYS mirrors volume (but NOT forced in loop anymore)
+    ledBrightness = volumeToAmp();
+    ledcWrite(ledPin, ledBrightness);
+  }
+}
+
+// ---------------- LED FLASH (100ms on volume change) ----------------
+void triggerLedFlash() {
+  ledBrightness = volumeToAmp();
+  ledcWrite(ledPin, ledBrightness);
+
+  ledFlashActive = true;
+  ledFlashTimer = millis();
+}
+
+void updateLedFlash() {
+  if (ledFlashActive && millis() - ledFlashTimer > 100) {
+    ledFlashActive = false;
+    ledcWrite(ledPin, ledBrightness);
   }
 }
 
@@ -212,7 +257,6 @@ void updateDisplay() {
     line1 = songs[currentGenre][currentSong];
   }
 
-  // ONLY update if changed
   if (line0 != lastLine0) {
     lcd.setCursor(0, 0);
     lcd.print("                ");
