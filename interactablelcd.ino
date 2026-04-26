@@ -1,96 +1,231 @@
-#include <IRremoteESP8266.h>
-#include <IRrecv.h>
-#include <IRutils.h>
-#include <Wire.h> 
+#include <IRremote.hpp>
+#include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 
-const int GREEN_LED_PIN = 4;
-const int POTENTIOMETER_PIN = 33;
-const int SPEAKER_PIN = 25;
-const int IR_RECIEVE_PIN = 15;
-const int xAxis = 34;
-const int yAxis = 35;
-const int btn = 32;
-
-const int freq = 5000;
-const int resolution = 12;
-
+// ---------------- LCD ----------------
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-IRrecv irrecv(IR_RECIEVE_PIN);
-decode_results results;
+// ---------------- PINS ----------------
+const int IR_PIN = 27;
+const int xAxis = 34;
+const int btn = 32;
+const int audioPin = 25;
 
-String decodeKeyValue(uint64_t result);
+// ---------------- STATE ----------------
+enum MenuState { SELECT_GENRE, SELECT_SONG, PLAYING };
+MenuState menuState = SELECT_GENRE;
 
+String genres[] = {"8-Bit", "Spooky", "Heroic"};
+
+String songs[3][2] = {
+  {"Mario", "Tetris"},
+  {"Ghost", "Skull"},
+  {"Quest", "Victory"}
+};
+
+int currentGenre = -1;
+int currentSong = 0;
+
+// ---------------- IR ----------------
+#define IR_1  0x0C
+#define IR_2  0x18
+#define IR_3  0x5E
+#define IR_PWR 0x45
+#define IR_PLUS 0x15
+#define IR_MINUS 0x09
+#define IR_PLAY 0x44
+
+int volume = 5;
+
+// ---------------- AUDIO ----------------
+int marioMelody[] = {659, 659, 0, 659, 0, 523, 659, 784};
+int tetrisMelody[] = {659, 494, 523, 587, 523, 494, 440, 440};
+int ghostMelody[]  = {392, 0, 392, 330, 392, 0, 262, 0};
+int skullMelody[]  = {262, 294, 330, 294, 262, 0, 196, 0};
+int questMelody[]  = {440, 494, 523, 587, 659, 587, 523, 494};
+int victoryMelody[] = {784, 659, 523, 659, 784, 880, 784, 0};
+
+// ---------------- AUDIO ENGINE ----------------
+int* melody;
+int noteIndex = 0;
+unsigned long noteTimer = 0;
+bool playingSong = false;
+
+// ---------------- BUTTON DEBOUNCE ----------------
+bool lastBtnState = HIGH;
+unsigned long lastDebounce = 0;
+const int debounceDelay = 60;
+
+// ---------------- SETUP ----------------
 void setup() {
   Serial.begin(115200);
 
   lcd.init();
   lcd.backlight();
-  lcd.setCursor(0, 0);
-  lcd.print("Hello!");
 
-  ledcAttach(GREEN_LED_PIN, freq, resolution);
+  pinMode(btn, INPUT_PULLUP);
+  pinMode(audioPin, OUTPUT);
 
-  pinMode(btn, INPUT);
+  IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
 
-  irrecv.enableIRIn();
+  updateDisplay();
 }
 
+// ---------------- LOOP ----------------
 void loop() {
-  readValues();
-  ledcWrite(GREEN_LED_PIN, 255)
-  delay(100);
+  handleIR();
+  handleJoystick();
+  updateSong();
 }
 
-void readValues() {
-  int potValue = analogRead(POTENTIOMETER_PIN);
-  int xValue = analogRead(xAxis);
-  int yValue = analogRead(yAxis);
-  int btnValue = digitalRead(btn);
+// ---------------- IR ----------------
+void handleIR() {
+  if (!IrReceiver.decode()) return;
 
-  Serial.printf("BTN: %d, X: %d, Y: %d, Pot: %d\n", btnValue, xValue, yValue, potValue);
+  uint8_t cmd = IrReceiver.decodedIRData.command;
 
-  lcd.setCursor(0, 0);
-  lcd.print("X:"); lcd.print(xValue);
-  lcd.print(" Y:"); lcd.print(yAxis);
-  lcd.setCursor(0, 1);
-  lcd.print("P:"); lcd.print(potValue);
-  lcd.print(" B:"); lcd.print(btnValue);
+  switch (cmd) {
 
-  if (irrecv.decode(&results)) {
-    String key = decodeKeyValue(results.value);
-    if (key != "ERROR") {
-      Serial.println(key);
+    case IR_1:
+      currentGenre = 0;
+      currentSong = 0;
+      menuState = SELECT_SONG;
+      break;
+
+    case IR_2:
+      currentGenre = 1;
+      currentSong = 0;
+      menuState = SELECT_SONG;
+      break;
+
+    case IR_3:
+      currentGenre = 2;
+      currentSong = 0;
+      menuState = SELECT_SONG;
+      break;
+
+    case IR_PWR:
+      currentGenre = -1;
+      menuState = SELECT_GENRE;
+      break;
+    case IR_PLAY:
+        if (menuState == SELECT_SONG && currentGenre >= 0) {
+          lcd.clear();
+          lcd.setCursor(0, 0);
+          lcd.print("Starting...");
+          delay(300);
+
+          startSong();
+      }
+  }
+
+  IrReceiver.resume();
+  updateDisplay();
+}
+
+// ---------------- JOYSTICK ----------------
+void handleJoystick() {
+  if (menuState != SELECT_SONG) return;
+
+  int xVal = analogRead(xAxis);
+
+  if (xVal < 1000) currentSong = 0;
+  if (xVal > 3000) currentSong = 1;
+
+  updateDisplay();
+}
+// ---------------- START SONG ----------------
+void startSong() {
+
+  if (currentGenre == 0 && currentSong == 0) melody = marioMelody;
+  else if (currentGenre == 0 && currentSong == 1) melody = tetrisMelody;
+  else if (currentGenre == 1 && currentSong == 0) melody = ghostMelody;
+  else if (currentGenre == 1 && currentSong == 1) melody = skullMelody;
+  else if (currentGenre == 2 && currentSong == 0) melody = questMelody;
+  else melody = victoryMelody;
+
+  noteIndex = 0;
+  noteTimer = millis();
+  playingSong = true;
+
+  tone(audioPin, melody[0]);
+
+  menuState = PLAYING;
+  updateDisplay();
+}
+
+// ---------------- AUDIO LOOP ----------------
+void updateSong() {
+  if (!playingSong) return;
+
+  if (millis() - noteTimer > 300) {
+
+    noteIndex++;
+
+    if (noteIndex >= 8) {
+      playingSong = false;
+      noTone(audioPin);
+      menuState = SELECT_SONG;
+      updateDisplay();
+      return;
     }
-    irrecv.resume();
+
+    noteTimer = millis();
+
+    int freq = melody[noteIndex];
+
+    if (freq > 0 && volume > 0) {
+      tone(audioPin, freq);
+    } else {
+      noTone(audioPin);
+    }
   }
 }
 
-String decodeKeyValue(uint64_t result) {
-  switch (result) {
-    case 0xFF6897: return "0";
-    case 0xFF30CF: return "1";
-    case 0xFF18E7: return "2";
-    case 0xFF7A85: return "3";
-    case 0xFF10EF: return "4";
-    case 0xFF38C7: return "5";
-    case 0xFF5AA5: return "6";
-    case 0xFF42BD: return "7";
-    case 0xFF4AB5: return "8";
-    case 0xFF52AD: return "9";
-    case 0xFF906F: return "+";
-    case 0xFFA857: return "-";
-    case 0xFFE01F: return "EQ";
-    case 0xFFB04F: return "U/SD";
-    case 0xFF9867: return "CYCLE";
-    case 0xFF22DD: return "PLAY/PAUSE";
-    case 0xFF02FD: return "BACKWARD";
-    case 0xFFC23D: return "FORWARD";
-    case 0xFFA25D: return "POWER";
-    case 0xFFE21D: return "MUTE";
-    case 0xFF629D: return "MODE";
-    case 0xFFFFFFFF: return "ERROR";
-    default: return "ERROR";
+// ---------------- DISPLAY ----------------
+String lastLine0 = "";
+String lastLine1 = "";
+
+void updateDisplay() {
+
+  String line0;
+  String line1;
+
+  if (menuState == SELECT_GENRE) {
+    line0 = "Music App";
+    line1 = "Pick Genre 1-3";
+  }
+
+  else if (menuState == SELECT_SONG && currentGenre >= 0) {
+    line0 = genres[currentGenre];
+
+    line1 = "";
+    line1 += (currentSong == 0 ? ">" : " ");
+    line1 += songs[currentGenre][0];
+    line1 += " ";
+    line1 += (currentSong == 1 ? ">" : " ");
+    line1 += songs[currentGenre][1];
+  }
+
+  else {
+    line0 = ">>> PLAYING <<<";
+    line1 = songs[currentGenre][currentSong];
+  }
+
+  // ONLY update if changed
+  if (line0 != lastLine0) {
+    lcd.setCursor(0, 0);
+    lcd.print("                ");
+    lcd.setCursor(0, 0);
+    lcd.print(line0);
+    lastLine0 = line0;
+  }
+
+  if (line1 != lastLine1) {
+    lcd.setCursor(0, 1);
+    lcd.print("                ");
+    lcd.setCursor(0, 1);
+    lcd.print(line1);
+    lastLine1 = line1;
   }
 }
