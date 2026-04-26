@@ -10,6 +10,7 @@ const int IR_PIN = 27;
 const int xAxis = 34;
 const int audioPin = 25;
 const int ledPin = 32;
+const int potPin = 33;
 
 // ---------------- STATE ----------------
 enum MenuState { SELECT_GENRE, SELECT_SONG, PLAYING };
@@ -76,7 +77,6 @@ void setup() {
 
   IrReceiver.begin(IR_PIN, ENABLE_LED_FEEDBACK);
 
-  // ESP32 v3 LEDC setup
   ledcAttach(ledPin, 5000, 8);
   ledcAttach(audioPin, 2000, 8);
 
@@ -85,10 +85,26 @@ void setup() {
 
 // ---------------- LOOP ----------------
 void loop() {
+  handlePot();
   handleIR();
   handleJoystick();
   updateSong();
   updateLedFlash();
+}
+
+// ---------------- POT ----------------
+void handlePot() {
+  static int lastPotVolume = -1;
+
+  int potValue = analogRead(potPin);
+  int newVolume = map(potValue, 0, 4095, 0, 10);
+
+  if (abs(newVolume - lastPotVolume) >= 1) {
+    volume = newVolume;
+    lastPotVolume = newVolume;
+
+    triggerLedFlash(); 
+  }
 }
 
 // ---------------- IR ----------------
@@ -205,13 +221,12 @@ void updateSong() {
       ledcWrite(audioPin, 0);
     }
 
-    // LED ALWAYS mirrors volume (but NOT forced in loop anymore)
     ledBrightness = volumeToAmp();
     ledcWrite(ledPin, ledBrightness);
   }
 }
 
-// ---------------- LED FLASH (100ms on volume change) ----------------
+// ---------------- LED FLASH ----------------
 void triggerLedFlash() {
   ledBrightness = volumeToAmp();
   ledcWrite(ledPin, ledBrightness);
